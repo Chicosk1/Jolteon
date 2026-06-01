@@ -29,7 +29,28 @@ services:
       - DOCKER_INFLUXDB_INIT_BUCKET=energia_salas
     restart: unless-stopped
 
-  # 3. Dashboard (Grafana)
+  # 3. Back-end Python (Orquestrador IoT + Interface Web)
+  backend:
+    build: ../backend
+    container_name: iot_backend
+    env_file:
+      - ../backend/.env
+    environment:
+      # Dentro da rede Docker, os serviços são acessados pelo nome do contêiner.
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - INFLUX_URL=http://influxdb:8086
+      - WEB_PORT=5000
+    ports:
+      - "5000:5000" # Interface web de configuração (RF05)
+    volumes:
+      - ./data/backend_data:/app/data # Persiste config.json (RF05/T07)
+    depends_on:
+      - mosquitto
+      - influxdb
+    restart: unless-stopped
+
+  # 4. Dashboard (Grafana)
   grafana:
     image: grafana/grafana:latest
     container_name: iot_grafana
@@ -45,7 +66,7 @@ services:
     restart: unless-stopped
 
   # =========================================================
-  # 4. Zigbee2MQTT (Bridge) 
+  # 5. Zigbee2MQTT (Bridge) — trabalho futuro (ESP32-C6), fora do escopo do MVP
   # ATENÇÃO: Mantenha comentado enquanto estiver no Windows.
   # Descomente quando for rodar no Raspberry Pi com o Dongle USB.
   # =========================================================

@@ -52,20 +52,24 @@ Desenvolvido em **C com ESP-IDF**, roda diretamente no microcontrolador.
 
 **Responsabilidades:**
 - Lê o **sensor PIR (HC-SR501)** para detectar movimento (`GPIO 2`)
-- Lê o **sensor LDR** para medir luminosidade (`GPIO 3`)
-- Controla o **relé de iluminação** (`GPIO 4`)
-- Conecta à rede Wi-Fi e publica dados no broker MQTT via TCP/IP
+- Lê o **sensor LDR** para medir luminosidade (`GPIO 3`) — `1` = claro, `0` = escuro
+- Controla o **relé de iluminação / SSR** (`GPIO 4`)
+- Conecta à rede Wi-Fi (com **reconexão automática**) e publica dados via MQTT
+- Executa uma **máquina de estados de 3 condições** (Ocupada → Ausência Detectada → Desligamento)
+- **Regra de decisão:** liga a carga apenas com *presença + ambiente escuro*; sob luz natural, mantém desligada
+- **Failsafe local (RF04):** após `TIMEOUT_AUSENCIA_S` sem movimento, desliga a carga de forma **autônoma**, sem depender do back-end
 
 **Tópicos MQTT publicados:**
 | Tópico | Payload | Descrição |
 |---|---|---|
 | `sala/{id}/ocupacao` | `1` ou `0` | Estado do sensor de movimento |
 | `sala/{id}/luminosidade` | `1` ou `0` | Estado do sensor de luz |
+| `sala/{id}/rele` | `ON` / `OFF` | Confirmação do estado atual do relé |
 
 **Tópicos MQTT assinados:**
 | Tópico | Payload | Descrição |
 |---|---|---|
-| `sala/{id}/comando` | `ON` / `OFF` | Controle remoto do relé |
+| `sala/{id}/comando` | `ON` / `OFF` | Controle remoto do relé (sobrepõe a lógica local) |
 
 ---
 
@@ -100,11 +104,21 @@ Coração lógico do sistema. Roda como processo Python e integra todos os servi
 **Arquivo principal:** `backend/src/main.py`
 
 **Responsabilidades:**
-- Conecta ao broker Mosquitto e **assina** o tópico `sala/+/ocupacao`
-- A cada mensagem recebida, **salva o dado** no InfluxDB
-- Executa um **job periódico** (a cada **X** segundos) verificando se alguma sala ultrapassou o tempo limite sem movimento (`TIMEOUT_TESTE = 30s`)
-- Ao detectar sala vazia por tempo excessivo, **envia alerta via Telegram** com botões de ação
+- Conecta ao broker Mosquitto e **assina** `sala/+/ocupacao` e `sala/+/luminosidade`
+- A cada mensagem recebida, **salva o dado** no InfluxDB (`sensor_pir` e `sensor_ldr`)
+- **Descobre salas dinamicamente** ao receber o primeiro evento de cada uma
+- Executa um **job periódico** com duas fases de timeout, **configuráveis por sala**:
+  - **Fase 1 (RF01/RF02):** sala vazia além de `timeout_ausencia` → envia alerta no Telegram com botões
+  - **Fase 2 (RF04):** sem resposta do coordenador em `timeout_resposta` → **desliga automaticamente**
 - Ao receber um clique nos botões, **publica comando MQTT** (`ON`/`OFF`) de volta para o ESP32
+- Expõe uma **interface web de configuração** (RF05) para ajustar os tempos por sala, **persistidos** em `config.json`
+
+**Módulos:**
+| Arquivo | Responsabilidade |
+|---|---|
+| `main.py` | Orquestrador (MQTT + Telegram + InfluxDB + jobs de timeout) |
+| `config_manager.py` | Configuração persistente por sala (RF05/T07) |
+| `web.py` | Interface web Flask de configuração (porta `5000`) |
 
 ---
 
@@ -149,14 +163,7 @@ ESP32 recebe e aciona o relé
 - Python 3.10+
 - ESP-IDF configurado (para compilar o firmware)
 
-### 1. Subir a infraestrutura
-
-```bash
-cd infrastructure
-docker compose up -d
-```
-
-### 2. Configurar variáveis de ambiente
+### 1. Configurar variáveis de ambiente
 
 Crie o arquivo `backend/.env`:
 
@@ -170,15 +177,27 @@ INFLUX_ORG=unimater
 INFLUX_BUCKET=energia_salas
 ```
 
-### 3. Instalar dependências e rodar o backend
+> No Docker, `MQTT_BROKER` e `INFLUX_URL` são sobrescritos automaticamente pelo
+> `docker-compose.yml` para apontar aos nomes dos contêineres (`mosquitto`/`influxdb`).
+
+### 2. Subir toda a stack (infra + back-end) via Docker
 
 ```bash
-cd backend
-pip install -r requirements.txt
-python src/main.py
+cd infrastructure
+docker compose up -d --build
 ```
 
-### 4. Compilar e gravar o firmware
+Isso sobe Mosquitto, InfluxDB, Grafana **e o back-end Python**. A **interface web de
+configuração** fica disponível em **http://localhost:5000** (ajuste de timeouts por sala).
+
+> **Alternativa (back-end fora do Docker, para desenvolvimento):**
+> ```bash
+> cd backend
+> pip install -r requirements.txt
+> python src/main.py
+> ```
+
+### 3. Compilar e gravar o firmware
 
 Edite `firmware/main/main.c` com as credenciais da rede Wi-Fi e o IP do broker, depois:
 
@@ -188,6 +207,11 @@ idf.py build flash monitor
 ```
 
 ---
+
+## 🧪 Testes
+
+O plano de testes completo (executável, com comandos e mapeamento aos requisitos
+RF/RNF e aos testes T01–T08 do artigo) está em **[PLANO_DE_TESTES.md](PLANO_DE_TESTES.md)**.
 
 ## 📁 Estrutura do Repositório
 
@@ -214,7 +238,6 @@ idf.py build flash monitor
 ## 🔮 Próximos Passos
 
 - [ ] Implementar autenticação no broker Mosquitto (usuário/senha)
-- [ ] Configurar dashboards de consumo no Grafana
-- [ ] Tornar o `TIMEOUT` configurável por sala via Telegram
-- [ ] Adicionar suporte a múltiplas salas de forma dinâmica
-- [ ] Criar Dockerfile para o backend Python
+- [ ] Provisionar dashboards de consumo no Grafana (RNF02 — uptime)
+- [ ] Validação física em sala-modelo e medição de payback real
+- [ ] (Futuro) Climatização, integração ERP e predição de ocupação por ML
